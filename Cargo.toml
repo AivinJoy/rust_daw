@@ -11,6 +11,11 @@ path = "src/lib.rs"
 name = "player"
 path = "src/main.rs"
 
+[[bin]]
+name = "engine_player"
+path = "src/engine_main.rs"
+
+
 [dependencies]
 anyhow = "1.0.100"
 cpal = "0.16.0"
