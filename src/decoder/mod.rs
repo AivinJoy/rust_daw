@@ -1,9 +1,10 @@
 // src/decoder/mod.rs
 
-mod control;
-mod dsp;
-mod output;
-mod resample;
+pub mod control;
+pub mod dsp;
+pub mod output;
+pub mod resample;
+pub mod pipe;
 
 use anyhow::anyhow;
 use ringbuf::traits::Producer as RbProducer;

@@ -10,13 +10,19 @@ use daw_modules::daw_controller::{DawController, DawMode};
 
 fn main() -> Result<(), anyhow::Error> {
     let args: Vec<String> = std::env::args().collect();
-    let (mode, track_path) = if args.len() > 1 {
-        (DawMode::KaraokeRecord, Some(args[1].clone()))
+    let (mode, track_path1, track_path2) = if args.len() > 2 {
+        // two paths: backing + second track
+        (DawMode::KaraokeRecord, Some(args[1].clone()), Some(args[2].clone()))
+    } else if args.len() > 1 {
+        // only one path: backing track
+        (DawMode::KaraokeRecord, Some(args[1].clone()), None)
     } else {
-        (DawMode::RecordOnly, None)
+        (DawMode::RecordOnly, None, None)
     };
 
-    let mut daw = DawController::new(mode, track_path)?;
+    let mut daw = DawController::new(mode, track_path1, track_path2)?;
+    // let mut daw = DawController::new_with_engine(mode, track_path)?;
+
 
     println!("Press [R] Record | [SPACE] Play/Pause | [L] Monitor toggle | [Q] Quit");
 
@@ -47,7 +53,7 @@ fn main() -> Result<(), anyhow::Error> {
                         break;
                     }
 
-                    daw.handle_key(ev.code);
+                    daw.handle_key(ev.code, ev.modifiers);
                     // Force an immediate tick update on input for responsiveness
                     daw.run_tick()?; 
                     continue; 
