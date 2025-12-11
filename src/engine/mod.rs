@@ -2,17 +2,20 @@
 
 pub mod track;
 pub mod mixer;
+pub mod time;
 
 pub use track::{Track, TrackId, TrackState};
 pub use mixer::Mixer;
+pub use time::TempoMap;
 
 use std::time::Duration;
 
 /// Global transport state for the engine.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub struct Transport {
     pub position: Duration,
     pub playing: bool,
+    pub tempo: TempoMap,
 }
 
 /// Simple multitrack engine: owns tracks + mixer and advances them in lockstep.
@@ -31,12 +34,17 @@ impl Engine {
             transport: Transport {
                 position: Duration::from_secs(0),
                 playing: false,
+                tempo: TempoMap::default(), //initailze 120BPM 4/4
             },
             sample_rate,
             channels,
             tracks: Vec::new(),
             mixer: Mixer::new(channels),
         }
+    }
+
+    pub fn set_bpm(&mut self, bpm: f32) {
+        self.transport.tempo.bpm = bpm as f64;
     }
 
     pub fn clear_tracks(&mut self) {
@@ -106,4 +114,5 @@ impl Engine {
         let secs = frames as f64 / self.sample_rate as f64;
         self.transport.position += Duration::from_secs_f64(secs);
     }
+
 }
