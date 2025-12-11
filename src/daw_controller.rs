@@ -12,13 +12,13 @@ use crossterm::{
     terminal::{BeginSynchronizedUpdate, Clear, ClearType, EndSynchronizedUpdate},
 };
 
-
 use crate::audio_runtime::AudioRuntime;
 use crate::Recorder;
 use crate::AudioPlayer; // used only to probe duration
 use crate::Waveform;
 use crate::session::export::export_project_to_wav;
 use crate::session::serialization::ProjectManifest; // If needed, or we just let save handle it.
+use crate::analyze_bpm_for_file;
 
 pub enum DawMode {
     RecordOnly,
@@ -38,6 +38,9 @@ pub struct DawController {
     // Precomputed waveform for uploaded track
     pub precomputed_waveform: Option<(Vec<f32>, Vec<f32>)>,
 
+    // Detected BPM for the primary track
+    pub bpm: Option<f32>,
+
     // --- OPTIMIZATION STATE ---
     cached_play_secs: u64,
     cached_rec_secs: u64,
@@ -54,9 +57,10 @@ pub struct DawController {
 
 impl DawController {
     pub fn new(
-        mode: DawMode, 
-        track_path1: Option<String>, 
-        track_path2: Option<String>,) -> Result<Self, anyhow::Error> {
+        mode: DawMode,
+        track_path1: Option<String>,
+        track_path2: Option<String>,
+    ) -> Result<Self, anyhow::Error> {
         // 1) Create AudioRuntime (Engine + CPAL stream), optionally with one track
         let audio = AudioRuntime::new(track_path1.clone())?;
 
@@ -84,6 +88,26 @@ impl DawController {
             None
         };
 
+        // 3b) Detect BPM if track is provided
+        let bpm = if let Some(path) = track_path1.as_ref() {
+            match analyze_bpm_for_file(path) {
+                Ok(Some(bpm)) => {
+                    println!("Detected BPM: {:.1}", bpm);
+                    Some(bpm)
+                }
+                Ok(None) => {
+                    println!("BPM detection inconclusive");
+                    None
+                }
+                Err(e) => {
+                    eprintln!("BPM detection failed: {e}");
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
         let ascii_grid = vec![String::with_capacity(120); 20];
 
         Ok(Self {
@@ -93,6 +117,7 @@ impl DawController {
             recorder: None,
             total_duration,
             precomputed_waveform,
+            bpm,
             cached_play_secs: u64::MAX,
             cached_rec_secs: u64::MAX,
             cached_waveform_len: 0,
@@ -111,7 +136,7 @@ impl DawController {
         let curr_time = self.current_time();
         let curr_secs = curr_time.as_secs();
 
-        let _ = write!(self.draw_buffer,"\n");
+        let _ = write!(self.draw_buffer, "\n");
         self.render_track_status();
 
         let (is_recording, rec_secs, wf_len) = if let Some(rec) = &self.recorder {
@@ -170,6 +195,12 @@ impl DawController {
             total.as_secs() % 60
         );
 
+        // Append BPM if we have it
+        if let Some(bpm) = self.bpm {
+            let _ = write!(self.draw_buffer, " | BPM: {:5.1}", bpm);
+        }
+
+
         if is_recording {
             let _ = write!(
                 self.draw_buffer,
@@ -212,14 +243,13 @@ impl DawController {
     }
 
     fn adjust_volume(&mut self, delta: f32) {
-    if let Some(audio) = &self.audio {
-        let current = audio.master_gain();
-        let new = (current + delta).clamp(0.0, 2.0);
-        audio.set_master_gain(new);
-        println!("Volume: {:.0}%", new * 100.0);
+        if let Some(audio) = &self.audio {
+            let current = audio.master_gain();
+            let new = (current + delta).clamp(0.0, 2.0);
+            audio.set_master_gain(new);
+            println!("Volume: {:.0}%", new * 100.0);
+        }
     }
-}
-
 
     fn seek_by_secs(&mut self, delta: i64) {
         if let Some(audio) = &self.audio {
@@ -287,7 +317,6 @@ impl DawController {
         }
     }
 
-
     // -------------------------------------------------------------
     // Record keys
     // -------------------------------------------------------------
@@ -335,8 +364,11 @@ impl DawController {
     }
 
     /// Returns true if a global shortcut was executed.
-    /// Returns true if a global shortcut was executed.
-    fn handle_global_shortcuts(&mut self, key: KeyCode, modifiers: crossterm::event::KeyModifiers) -> bool {
+    fn handle_global_shortcuts(
+        &mut self,
+        key: KeyCode,
+        modifiers: crossterm::event::KeyModifiers,
+    ) -> bool {
         // All global shortcuts require CONTROL
         if !modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
             return false;
@@ -366,10 +398,10 @@ impl DawController {
 
             // [CTRL + B] => BOUNCE (EXPORT)
             KeyCode::Char('b') | KeyCode::Char('B') => {
-                 if let Some(audio) = &self.audio {
+                if let Some(audio) = &self.audio {
                     // 1. Auto-save to ensure we export current state
                     let _ = audio.save_session("project.json");
-                    
+
                     // 2. Load manifest from disk
                     if let Ok(manifest) = ProjectManifest::load_from_disk("project.json") {
                         // 3. Run Export
@@ -377,8 +409,8 @@ impl DawController {
                             println!("Export failed: {}", e);
                         }
                     }
-                 }
-                 true
+                }
+                true
             }
 
             // [CTRL + O] => OPEN / LOAD
@@ -387,7 +419,7 @@ impl DawController {
                     if let Err(e) = audio.load_session("project.json") {
                         println!("Error loading: {}", e);
                     } else {
-                        self.force_redraw = true; 
+                        self.force_redraw = true;
                     }
                 }
                 true
@@ -401,7 +433,7 @@ impl DawController {
         if let Some(audio) = &self.audio {
             audio.undo();
             // Force redraw to show the slider jumping back
-            self.force_redraw = true; 
+            self.force_redraw = true;
         }
     }
 
@@ -483,7 +515,7 @@ impl DawController {
         }
     }
 
-        fn reset_track1_gain(&mut self) {
+    fn reset_track1_gain(&mut self) {
         if let Some(audio) = &self.audio {
             audio.reset_track_gain(0);
         }
@@ -517,7 +549,7 @@ impl DawController {
                         "\nTr{} [{}{}] gain:{:>3}% pan:{:>4}",
                         i + 1,
                         if t.muted { "M" } else { "-" },
-                        if t.solo  { "S" } else { "-" },
+                        if t.solo { "S" } else { "-" },
                         (t.gain * 100.0).round() as i32,
                         format!("{:.2}", t.pan),
                     );
@@ -525,8 +557,6 @@ impl DawController {
             }
         }
     }
-
-
 
     // -------------------------------------------------------------
     // Playback keys
@@ -567,6 +597,5 @@ impl DawController {
             KeyCode::Char('j') | KeyCode::Char('J') => self.reset_track2_pan(),
             _ => {}
         }
-    }  
-
+    }
 }

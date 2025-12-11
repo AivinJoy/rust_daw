@@ -9,6 +9,7 @@ use cpal::Stream;
 use crate::audio::setup_output_device;
 use crate::engine::Engine;
 use crate::session::{Session, commands::{SetTrackGain, SetTrackPan, SetTrackMute}}; // Import Session & Commands
+use crate::engine::time::GridLine;
 
 /// Owns Engine + CPAL stream and exposes a simple control API.
 pub struct AudioRuntime {
@@ -354,6 +355,20 @@ impl AudioRuntime {
             println!("📂 Project loaded from {}", filename);
         }
         Ok(())
+    }
+
+    pub fn set_bpm(&self, bpm: f32) {
+        if let Ok(mut eng) = self.engine.lock() {
+            eng.set_bpm(bpm);
+        }
+    }
+
+    pub fn get_grid_lines(&self, start: Duration, end: Duration, resolution: u32) -> Vec<GridLine> {
+        if let Ok(eng) = self.engine.lock() {
+            eng.transport.tempo.get_grid_lines(start, end, resolution)
+        } else {
+            Vec::new()
+        }
     }
 
 }
