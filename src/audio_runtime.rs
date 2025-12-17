@@ -9,6 +9,7 @@ use cpal::Stream;
 use crate::audio::setup_output_device;
 use crate::engine::Engine;
 use crate::session::{Session, commands::{SetTrackGain, SetTrackPan, SetTrackMute}}; // Import Session & Commands
+use crate::engine::time::GridLine;
 
 /// Owns Engine + CPAL stream and exposes a simple control API.
 pub struct AudioRuntime {
@@ -164,8 +165,8 @@ impl AudioRuntime {
     }
 
     pub fn set_master_gain(&self, gain: f32) {
-        if let Ok(mut g) = self.master_gain.lock() {
-            *g = gain.clamp(0.0, 2.0);
+        if let Ok(mut eng) = self.engine.lock() {
+            eng.master_gain = gain.clamp(0.0, 2.0);
         }
     }
 
@@ -200,20 +201,21 @@ impl AudioRuntime {
         }
     }
 
-    pub fn solo_track(&self, solo_index: usize) {
-        // Simple solo (not undoable yet for simplicity, or we can make a BulkCommand later)
+    // src/audio_runtime.rs
+
+    pub fn toggle_solo(&self, track_index: usize) {
         if let Ok(mut eng) = self.engine.lock() {
-            for (i, track) in eng.tracks_mut().iter_mut().enumerate() {
-                if i == solo_index {
-                    track.solo = true;
-                    track.muted = false;
-                } else {
-                    track.solo = false;
-                    track.muted = true;
-                }
+            if let Some(track) = eng.tracks_mut().get_mut(track_index) {
+                track.solo = !track.solo;
+                println!("Track {} solo: {}", track_index, track.solo);
             }
-            println!("Soloing track {}", solo_index);
         }
+    }
+
+    // Rename the old solo_track to this (or just replace it)
+    // We remove the logic that iterated and muted everyone else.
+    pub fn solo_track(&self, track_index: usize) {
+        self.toggle_solo(track_index);
     }
 
     pub fn clear_solo(&self) {
@@ -311,6 +313,47 @@ impl AudioRuntime {
         }
     }
 
+    pub fn set_track_gain(&self, track_index: usize, gain: f32) {
+        // 1. Get current gain
+        let (track_id, old_gain) = {
+            let eng = self.engine.lock().unwrap();
+            if let Some(t) = eng.tracks().get(track_index) {
+                (t.id, t.gain)
+            } else { return; }
+        };
+
+        // 2. Create Command (Reuse existing SetTrackGain logic)
+        let cmd = Box::new(crate::session::commands::SetTrackGain {
+            track_id,
+            old_gain,
+            new_gain: gain.clamp(0.0, 2.0),
+        });
+
+        // 3. Apply
+        if let Ok(mut session) = self.session.lock() {
+            let _ = session.apply(&self.engine, cmd);
+        }
+    }
+
+    pub fn set_track_pan(&self, track_index: usize, pan: f32) {
+        let (track_id, old_pan) = {
+            let eng = self.engine.lock().unwrap();
+            if let Some(t) = eng.tracks().get(track_index) {
+                (t.id, t.pan)
+            } else { return; }
+        };
+
+        let cmd = Box::new(crate::session::commands::SetTrackPan {
+            track_id,
+            old_pan,
+            new_pan: pan.clamp(-1.0, 1.0),
+        });
+
+        if let Ok(mut session) = self.session.lock() {
+            let _ = session.apply(&self.engine, cmd);
+        }
+    }
+
     pub fn debug_snapshot(&self) -> Option<EngineSnapshot> {
         if let Ok(eng) = self.engine.lock() {
             let tracks = eng
@@ -326,6 +369,12 @@ impl AudioRuntime {
             Some(EngineSnapshot { tracks })
         } else {
             None
+        }
+    }
+
+    pub fn set_track_start_time(&self, track_index: usize, start_time: f64) {
+        if let Ok(mut eng) = self.engine.lock() {
+            eng.set_track_start_time(track_index, start_time);
         }
     }
 
@@ -354,6 +403,20 @@ impl AudioRuntime {
             println!("📂 Project loaded from {}", filename);
         }
         Ok(())
+    }
+
+    pub fn set_bpm(&self, bpm: f32) {
+        if let Ok(mut eng) = self.engine.lock() {
+            eng.set_bpm(bpm);
+        }
+    }
+
+    pub fn get_grid_lines(&self, start: Duration, end: Duration, resolution: u32) -> Vec<GridLine> {
+        if let Ok(eng) = self.engine.lock() {
+            eng.transport.tempo.get_grid_lines(start, end, resolution)
+        } else {
+            Vec::new()
+        }
     }
 
 }

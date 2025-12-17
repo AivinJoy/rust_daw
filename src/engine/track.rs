@@ -15,8 +15,6 @@ use ringbuf::storage::Heap;
 use ringbuf::SharedRb;
 use ringbuf::traits::Consumer;
 
-
-
 use crate::decoder::{spawn_decoder_with_ctrl, DecoderCmd};
 
 /// Identifier for a track.
@@ -51,7 +49,6 @@ impl DecoderHandle {
         source_sample_rate: u32,
         output_sample_rate: u32,
     ) -> anyhow::Result<Self> {
-        // Same buffer size as AudioPlayer.
         let rb = HeapRb::<f32>::new(131_072);
         let (producer, consumer) = rb.split();
 
@@ -82,8 +79,14 @@ impl DecoderHandle {
         self.is_playing.store(playing, Ordering::Relaxed);
     }
 
-    pub fn seek(&self, pos: Duration) {
+    // --- UPDATED: Seek now clears buffer to fix delay ---
+    pub fn seek(&mut self, pos: Duration) {
+        // 1. Tell decoder to seek
         let _ = self.seek_tx.send(DecoderCmd::Seek(pos));
+        
+        // 2. Clear buffer instantly to remove old audio
+        // FIX: Use try_pop() instead of pop()
+        while self.consumer.try_pop().is_some() {}
     }
 
     /// Read up to `frames` of interleaved f32 into `dst`. Returns frames actually written.
@@ -112,7 +115,6 @@ impl DecoderHandle {
         full_samples / channels
     }
 
-
     #[allow(dead_code)]
     pub fn output_sample_rate(&self) -> u32 {
         self.output_sample_rate
@@ -132,6 +134,9 @@ pub struct Track {
     pub muted: bool,
     pub solo: bool,
 
+    // --- Track Start Time (for Drag & Drop) ---
+    pub start_time: Duration,
+
     state: TrackState,
     decoder: DecoderHandle,
 }
@@ -144,15 +149,11 @@ impl Track {
         engine_sample_rate: u32,
         engine_channels: usize,
     ) -> anyhow::Result<Self> {
-        // For now, use engine format as "source" format.
-        let source_sample_rate = engine_sample_rate;
-        let source_channels = engine_channels;
-
         let decoder = DecoderHandle::new_for_engine(
             path.clone(),
-            source_channels,
+            engine_channels, 
             engine_channels,
-            source_sample_rate,
+            engine_sample_rate,
             engine_sample_rate,
         )?;
 
@@ -163,9 +164,14 @@ impl Track {
             pan: 0.0,
             muted: false,
             solo: false,
+            start_time: Duration::ZERO,
             state: TrackState::Stopped,
             decoder,
         })
+    }
+
+    pub fn state(&self) -> TrackState {
+        self.state
     }
 
     pub fn set_state(&mut self, st: TrackState) {
@@ -174,31 +180,61 @@ impl Track {
             .set_playing(matches!(st, TrackState::Playing));
     }
 
-    pub fn seek(&mut self, pos: Duration) {
-        self.decoder.seek(pos);
+    pub fn seek(&mut self, global_pos: Duration) {
+        // Seek relative to track start
+        let track_pos = global_pos.saturating_sub(self.start_time);
+        self.decoder.seek(track_pos);
     }
 
-    pub fn is_audible(&self) -> bool {
-        matches!(self.state, TrackState::Playing) && !self.muted && self.gain > 0.0
+    pub fn is_active(&self) -> bool {
+        matches!(self.state, TrackState::Playing) && self.gain > 0.0
     }
 
-    /// Pull `frames` of interleaved f32 into `dst`. Returns actually written frames.
-    pub fn render_into(&mut self, dst: &mut [f32], channels: usize) -> usize {
+    /// Pull `frames` of interleaved f32 into `dst`.
+    /// Handles start_time offset logic.
+    pub fn render_into(
+        &mut self, 
+        dst: &mut [f32], 
+        channels: usize, 
+        engine_time: Duration, 
+        sample_rate: u32
+    ) -> usize {
         dst.fill(0.0);
 
-        if !self.is_audible() {
-            return dst.len() / channels;
+        if !self.is_active() {
+            return 0;
         }
 
-        let frames = dst.len() / channels;
+        // 1. Calculate time overlap
+        let start_secs = self.start_time.as_secs_f64();
+        let current_secs = engine_time.as_secs_f64();
+        let buffer_duration = (dst.len() / channels) as f64 / sample_rate as f64;
+        let end_secs = current_secs + buffer_duration;
 
-        // Read from decoder.
-        let written_frames = self.decoder.read_interleaved(dst, frames, channels);
+        // If the track hasn't started yet in this block
+        if end_secs <= start_secs {
+            return 0; 
+        }
 
-        // Apply gain and simple pan in-place.
+        // 2. Calculate Offset (Silence before track starts within this block)
+        let mut offset_frames = 0;
+        if current_secs < start_secs {
+            let silence_duration = start_secs - current_secs;
+            offset_frames = (silence_duration * sample_rate as f64).round() as usize;
+        }
+
+        if offset_frames * channels >= dst.len() {
+            return 0;
+        }
+
+        // 3. Read Audio into the remaining part of the buffer
+        let audio_dst = &mut dst[(offset_frames * channels)..];
+        let frames_to_read = audio_dst.len() / channels;
+        let written_frames = self.decoder.read_interleaved(audio_dst, frames_to_read, channels);
+
+        // 4. Apply Gain/Pan only to the audio part
         let gain = self.gain;
         let pan = self.pan.clamp(-1.0, 1.0);
-
         let (pan_l, pan_r) = if channels >= 2 {
             let angle = (pan + 1.0) * 0.25 * std::f32::consts::PI;
             (angle.cos(), angle.sin())
@@ -208,18 +244,17 @@ impl Track {
 
         for f in 0..written_frames {
             if channels == 1 {
-                let idx = f;
-                dst[idx] *= gain;
+                audio_dst[f] *= gain;
             } else {
                 let base = f * channels;
-                dst[base] *= gain * pan_l;
-                dst[base + 1] *= gain * pan_r;
+                audio_dst[base] *= gain * pan_l;
+                audio_dst[base + 1] *= gain * pan_r;
                 for ch in 2..channels {
-                    dst[base + ch] *= gain;
+                    audio_dst[base + ch] *= gain;
                 }
             }
         }
 
-        written_frames
+        offset_frames + written_frames
     }
 }

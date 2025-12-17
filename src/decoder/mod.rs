@@ -93,9 +93,13 @@ where
 
         let mut decoder = get_codecs().make(&track.codec_params, &DecoderOptions::default())?;
         let mut sample_buf: Option<SampleBuffer<f32>> = None;
+        let actual_rate = track.codec_params.sample_rate.unwrap_or(self.source_sample_rate);
 
         let mut resampler =
-            resample::build_resampler(self.source_sample_rate, self.output_sample_rate, self.output_channels)?;
+            resample::build_resampler(
+                actual_rate,
+                self.output_sample_rate,
+                self.output_channels)?;
         let mut stage_planar: Vec<Vec<f32>> = vec![Vec::with_capacity(4096); self.output_channels];
 
         loop {
